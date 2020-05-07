@@ -99,6 +99,9 @@ class FFTBaseReconstruction(FFTBase):
         attrs['shotnoise'] = Pshot
 
 
+        return p3d, attrs
+
+
 class FFTPowerReconstruction(FFTPower, FFTBaseReconstruction):
     """
     Algorithm to compute the 1d or 2d power spectrum and/or multipoles
