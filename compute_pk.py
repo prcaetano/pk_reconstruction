@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import os
 from nbodykit.lab import CSVCatalog
 from fftpower_reconstruction import FFTPowerReconstruction
