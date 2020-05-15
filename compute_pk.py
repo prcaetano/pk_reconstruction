@@ -1,4 +1,12 @@
 #!/usr/bin/env python
+"""
+Code to compute power spectrum and multipoles for particles in a box, interfacing with nbodykit.
+
+Original author: Alex Krolewski
+Modified by: Pedro Rangel Caetano
+    (implementation of FFTPowerReconstruction class to compute overdensity field subtracting
+    from random catalog, loads config from yaml file)
+"""
 import os
 from nbodykit.lab import CSVCatalog
 from fftpower_reconstruction import FFTPowerReconstruction
@@ -38,6 +46,7 @@ if __name__ == "__main__":
     output_name_pk_l = load_config("output", "output_name_pk_multipoles")
 
     Nmesh = load_config("pk_config", "Nmesh")
+    compute_via_crosscorrelations = load_config("pk_config", "compute_via_crosscorrelations", False)
     BoxSize = load_config("simulation_config", "BoxSize")
 
     # Need mesh to be big enough so that nyquist frequency is > kmax
@@ -75,10 +84,25 @@ if __name__ == "__main__":
     mesh_d = cat_d.to_mesh(window='tsc',Nmesh=Nmesh,compensated=True,interlaced=True,position='RSDPosition')
     mesh_s = cat_s.to_mesh(window='tsc',Nmesh=Nmesh,compensated=True,interlaced=True,position='RSDPosition')
 
-    r = FFTPowerReconstruction(displaced=mesh_d,random=mesh_s,mode='2d',dk=dk,kmin=kmin,kmax=kmax,Nmu=Nmu,
-                               los=[0,0,1],poles=[0,2,4])
-    Pkmu = r.power
-    poles = r.poles
+    if compute_via_crosscorrelations:
+        from nbodykit.lab import FFTPower
+        r_d = FFTPower(first=mesh_d,mode='2d',dk=dk,kmin=kmin,kmax=kmax,Nmu=Nmu,los=[0,0,1],poles=[0,2,4])
+        r_s = FFTPower(first=mesh_s,mode='2d',dk=dk,kmin=kmin,kmax=kmax,Nmu=Nmu,los=[0,0,1],poles=[0,2,4])
+        r_ds = FFTPower(first=mesh_d,second=mesh_s,mode='2d',
+                        dk=dk,kmin=kmin,kmax=kmax,Nmu=Nmu,los=[0,0,1],poles=[0,2,4])
+
+        Pkmu_d = r_d.power
+        Pkmu_s = r_s.power
+        Pkmu_ds = r_ds.power
+
+        poles_d = r_d.poles
+        poles_s = r_s.poles
+        poles_ds = r_ds.poles
+    else:
+        r = FFTPowerReconstruction(displaced=mesh_d,random=mesh_s,mode='2d',dk=dk,kmin=kmin,kmax=kmax,
+                                   Nmu=Nmu,los=[0,0,1],poles=[0,2,4])
+        Pkmu = r.power
+        poles = r.poles
 
     # Writing output pk
     with open(os.path.join(path, output_name_pk), "w") as f:
@@ -86,20 +110,47 @@ if __name__ == "__main__":
         f.write('# Displaced catalog: %s\n' % (displaced_catalog_fname))
         f.write('# Random catalog: %s\n' % (random_catalog_fname))
         f.write('# Estimated shot noise subtracted from power spectra\n')
-        f.write('# Estimated shot noise for reconstructed field: %.5f\n' % (Pkmu[:,0].attrs['shotnoise']))
+        if compute_via_crosscorrelations:
+            f.write('# Estimated shot noise for displaced field: %.5f\n' % (Pkmu_d[:,0].attrs['shotnoise']))
+            f.write('# Estimated shot noise for random field: %.5f\n' % (Pkmu_s[:,0].attrs['shotnoise']))
+        else:
+            f.write('# Estimated shot noise for reconstructed field: %.5f\n'%(Pkmu[:,0].attrs['shotnoise']))
         f.write('# Code to generate this measurement in ' + __file__ + '\n')
         f.write('# Boxsize = %.1f\n'  % BoxSize)
         f.write('# Nmesh =  %i\n' % Nmesh)
         f.write('# Binning = ' + binning + '\n')
-        f.write('# k mu pk-shotnoise shotnoise\n')
-        for i in range(Pkmu.shape[1]):
-            Pk = Pkmu[:,i]
-            mu = Pkmu.coords['mu'][i]
-            for j in range(len(Pk['k'])):
-                k = Pk['k'][j]
-                shotnoise = Pk.attrs['shotnoise']
-                Pk_val = Pk['power'][j].real - shotnoise
-                f.write('%20.8e %20.8e %20.8e %20.8e\n' % (k, mu, Pk_val, shotnoise))
+
+        if compute_via_crosscorrelations:
+            f.write('# k mu pk-shotnoise Nmodes_d Nmodes_s Shotnoise_d Shotnoise_s\n')
+            for i in range(Pkmu_d.shape[1]):
+                Pk_d = Pkmu_d[:,i]
+                Pk_s = Pkmu_s[:,i]
+                Pk_ds = Pkmu_ds[:,i]
+                mu = Pkmu_d.coords['mu'][i]
+                for j in range(len(Pk_d['k'])):
+                    k = Pk_d['k'][j]
+                    shotnoise_d = Pk_d.attrs['shotnoise']
+                    shotnoise_s = Pk_s.attrs['shotnoise']
+                    Pk_d_val = Pk_d['power'][j].real-shotnoise_d
+                    Pk_s_val = Pk_s['power'][j].real-shotnoise_s
+                    Pk_ds_val = Pk_ds['power'][j].real
+                    modes_d_val = Pkmu_d.data["modes"][:,i][j]
+                    modes_s_val = Pkmu_s.data["modes"][:,i][j]
+                    Pk_val = Pk_d_val + Pk_s_val - 2*Pk_ds_val
+
+                    f.write('%20.8e %20.8e %20.8e %i %i %20.8e %20.8e\n' % (k, mu, Pk_val,
+                                                                            modes_d_val, modes_s_val,
+                                                                            shotnoise_d, shotnoise_s))
+        else:
+            f.write('# k mu pk-shotnoise shotnoise\n')
+            for i in range(Pkmu.shape[1]):
+                Pk = Pkmu[:,i]
+                mu = Pkmu.coords['mu'][i]
+                for j in range(len(Pk['k'])):
+                    k = Pk['k'][j]
+                    shotnoise = Pk.attrs['shotnoise']
+                    Pk_val = Pk['power'][j].real - shotnoise
+                    f.write('%20.8e %20.8e %20.8e %20.8e\n' % (k, mu, Pk_val, shotnoise))
 
     # Writing output multipoles
     with open(os.path.join(path, output_name_pk_l), "w") as f:
@@ -107,18 +158,40 @@ if __name__ == "__main__":
         f.write('# Displaced catalog: %s\n' % (displaced_catalog_fname))
         f.write('# Random catalog: %s\n' % (random_catalog_fname))
         f.write('# Estimated shot noise subtracted from power spectra\n')
-        f.write('# Estimated shot noise for reconstructed field: %.5f\n' % (Pkmu[:,0].attrs['shotnoise']))
+        if compute_via_crosscorrelations:
+            f.write('# Estimated shot noise for displaced field: %.5f\n'%(Pkmu_d[:,0].attrs['shotnoise']))
+            f.write('# Estimated shot noise for random field: %.5f\n'%(Pkmu_s[:,0].attrs['shotnoise']))
+        else:
+            f.write('# Estimated shot noise for reconstructed field: %.5f\n'%(Pkmu[:,0].attrs['shotnoise']))
         f.write('# Code to generate this measurement in ' + __file__ + '\n')
         f.write('# Boxsize = %.1f\n'  % BoxSize)
         f.write('# Nmesh =  %i\n' % Nmesh)
         f.write('# Binning = ' + binning + '\n')
-        f.write('# k P0-shotnoise P2-shotnoise P4-shotnoise shotnoise\n')
-        shotnoise = poles.attrs['shotnoise']
-        P0 = poles['power_0'].real - shotnoise
-        P2 = poles['power_2'].real - shotnoise
-        P4 = poles['power_4'].real - shotnoise
-        for i in range(len(P0)):
-            f.write('%20.8e %20.8e %20.8e %20.8e %20.8e\n' % (poles['k'][i], P0[i], P2[i], P4[i], shotnoise))
+
+        if compute_via_crosscorrelations:
+            f.write('# k P0-shotnoise P2-shotnoise P4-shotnoise Nmodes_d Nmodes_s Shotnoise_d Shotnoise_s\n')
+            shotnoise_d = poles_d.attrs['shotnoise']
+            shotnoise_s = poles_s.attrs['shotnoise']
+            shotnoise = shotnoise_d + shotnoise_s
+            P0 = poles_d['power_0'].real + poles_s['power_0'].real - 2*poles_ds['power_0'].real - shotnoise
+            P2 = poles_d['power_2'].real + poles_s['power_2'].real - 2*poles_ds['power_2'].real - shotnoise
+            P4 = poles_d['power_4'].real + poles_s['power_4'].real - 2*poles_ds['power_4'].real - shotnoise
+            nmodes_d = poles_d.data['modes']
+            nmodes_s = poles_s.data['modes']
+
+            for i in range(len(P0)):
+                f.write('%20.8e %20.8e %20.8e %20.8e %i %i %20.8e %20.8e\n' % (poles_d['k'][i],
+                                                                               P0[i], P2[i], P4[i],
+                                                                               nmodes_d[i], nmodes_s[i],
+                                                                               shotnoise_d, shotnoise_s))
+        else:
+            f.write('# k P0-shotnoise P2-shotnoise P4-shotnoise shotnoise\n')
+            shotnoise = poles.attrs['shotnoise']
+            P0 = poles['power_0'].real - shotnoise
+            P2 = poles['power_2'].real - shotnoise
+            P4 = poles['power_4'].real - shotnoise
+            for i in range(len(P0)):
+                f.write('%20.8e %20.8e %20.8e %20.8e %20.8e\n' % (poles['k'][i], P0[i], P2[i], P4[i], shotnoise))
 
     print('Total time (s): ', time.time()-t0)
 
